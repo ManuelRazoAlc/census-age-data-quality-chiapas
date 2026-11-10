@@ -1,0 +1,203 @@
+---
+title: "Calidad de la declaración de edad en Chiapas"
+subtitle: "Censo de Población y Vivienda 2020"
+author: "Manuel Razo Alcántara"
+lang: es
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: flatly
+    code_folding: hide
+    self_contained: true
+---
+
+```{r configuracion, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.align = "center", fig.width = 9, fig.height = 4.2, dpi = 130)
+options(scipen = 999)
+
+source("R/funciones_demografia.R")
+library(ggplot2)
+library(knitr)
+
+ruta <- "data/chiapas_poblacion_edad_2020.xlsx"
+desplegadas <- leer_hoja_demografica(ruta, "Edades Desplegadas")
+quinquenales <- leer_hoja_demografica(ruta, "Edades Quinquenales")
+
+num <- function(x, d = 0) format(round(x, d), big.mark = ",", nsmall = d)
+y_lista <- function(x) if (length(x) == 1) as.character(x) else paste(paste(head(x, -1), collapse = ", "), "y", tail(x, 1))
+col_hombres <- "#2C6E9B"
+col_mujeres <- "#C8553D"
+col_neutro <- "#9AA5AE"
+tema <- theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank(), plot.title.position = "plot")
+
+dir.create("salidas", showWarnings = FALSE)
+```
+
+```{r totales, include=FALSE}
+total <- desplegadas$total[desplegadas$edades == "Total"]
+no_especificado <- desplegadas$total[str_detect(str_to_lower(desplegadas$edades), "no especific")]
+```
+
+# Objetivo
+
+En un censo, la edad se declara de memoria y muchas veces la responde otra persona del hogar. Por eso suele concentrarse en edades "redondas", terminadas en 0 o en 5. Antes de usar la estructura por edad de una población, conviene medir qué tan confiable es esa declaración.
+
+En este reporte evalúo la calidad de la declaración de edad en Chiapas con datos del Censo 2020. Uso tres índices (Whipple, Myers y Naciones Unidas) y después corrijo la población por grupos de edad: reparto la edad no especificada y suavizo los grupos quinquenales.
+
+# Datos
+
+La fuente es el Censo de Población y Vivienda 2020 del INEGI (cuestionario básico), con la población de Chiapas por sexo y por edad, tanto en años cumplidos como en grupos quinquenales. El censo registró **`r num(total)` personas** en Chiapas, y **`r num(no_especificado)`** (`r num(100 * no_especificado / total, 2)`%) no declararon su edad.
+
+```{r grafica-edad-simple, fig.cap="Población por edad simple. Las barras oscuras son las edades terminadas en 0 o en 5."}
+edad_simple <- desplegadas |>
+  filter(!is.na(edad_inicial), edad_inicial <= 99) |>
+  mutate(redonda = edad_inicial %% 5 == 0)
+
+g_edad <- ggplot(edad_simple, aes(edad_inicial, total / 1000, fill = redonda)) +
+  geom_col(width = 0.85) +
+  scale_fill_manual(values = c(`TRUE` = "#1F3B57", `FALSE` = "#A9BCCB"), guide = "none") +
+  scale_x_continuous(breaks = seq(0, 100, 10)) +
+  labs(x = "Edad", y = "Miles de personas",
+       title = "Población de Chiapas por edad simple, 2020") +
+  tema
+g_edad
+```
+
+Los picos en 20, 30, 40, 50 y 60 años, y en menor medida en las edades terminadas en 5, ya muestran la preferencia por ciertos dígitos. Los índices siguientes la miden.
+
+# Índice de Whipple
+
+El índice de Whipple compara la población con edades terminadas en 0 y 5 (o solo en 0) contra la que se esperaría si todos los dígitos tuvieran el mismo peso, en el rango de 23 a 62 años. Si no hubiera preferencia, valdría 100.
+
+```{r whipple}
+whipple <- calcular_whipple(desplegadas)
+write.csv(whipple, "salidas/whipple.csv", row.names = FALSE)
+
+kable(whipple, digits = 2, format.args = list(big.mark = ","),
+      col.names = c("Población", "Dígito evaluado", "Índice de Whipple", "Clasificación"))
+```
+
+```{r whipple-valores, include=FALSE}
+w05 <- whipple$indice_whipple[whipple$poblacion == "Total" & whipple$digito_evaluado == "Terminación 0 y 5"]
+w0 <- whipple$indice_whipple[whipple$poblacion == "Total" & whipple$digito_evaluado == "Terminación 0"]
+```
+
+Para la población total, el índice es de **`r num(w05, 2)`** para las edades terminadas en 0 y 5, es decir, se declaran `r num(w05 - 100, 0)`% más edades redondas de las esperadas, y los datos se clasifican como aproximados. Si se considera solo el dígito 0, el índice sube a **`r num(w0, 2)`** y los datos pasan a deficientes: la atracción hacia el 0 es más fuerte que hacia el 5. Los hombres tienen índices un poco más altos que las mujeres.
+
+# Índice de Myers
+
+El índice de Myers revisa los diez dígitos finales, no solo el 0 y el 5. Para cada dígito calcula qué porcentaje de la población declara una edad que termina en él (entre 10 y 79 años) y lo compara con el 10% esperado. El índice es la suma de esas desviaciones: va de 0 (sin preferencia) a 180 (todas las edades terminan en el mismo dígito).
+
+```{r myers}
+myers <- calcular_myers(desplegadas)
+write.csv(myers$resumen, "salidas/myers_resumen.csv", row.names = FALSE)
+write.csv(myers$tablas$total, "salidas/myers_detalle_total.csv", row.names = FALSE)
+
+kable(myers$resumen, digits = 3,
+      col.names = c("Población", "Índice de Myers", "Clasificación"))
+```
+
+```{r grafica-myers, fig.height=3.8, fig.cap="Desviación de cada dígito final respecto al 10% esperado, población total."}
+detalle <- myers$tablas$total
+g_myers <- ggplot(detalle, aes(factor(digito), Mj, fill = atraccion_rechazo)) +
+  geom_col(width = 0.7) +
+  geom_hline(yintercept = 0, color = "grey30") +
+  scale_fill_manual(values = c(`Atracción` = "#1F3B57", Rechazo = "#C9D3DB"), name = NULL) +
+  labs(x = "Dígito final de la edad", y = "Puntos porcentuales",
+       title = "Atracción y rechazo por dígito final") +
+  tema + theme(legend.position = "top")
+g_myers
+```
+
+```{r myers-valores, include=FALSE}
+atraccion <- detalle$digito[detalle$Mj >= 0]
+rechazo <- detalle$digito[detalle$Mj < 0]
+mayor_atraccion <- detalle$digito[which.max(detalle$Mj)]
+mayor_rechazo <- detalle$digito[which.min(detalle$Mj)]
+m_total <- myers$resumen$indice_myers[1]
+```
+
+El índice de Myers para la población total es de **`r num(m_total, 2)`**, una concentración mediana. Los dígitos `r y_lista(atraccion)` atraen declaraciones y los dígitos `r y_lista(rechazo)` las rechazan. El que más atrae es el **`r mayor_atraccion`** y el que más rechaza es el **`r mayor_rechazo`**, lo que confirma lo que se veía en la gráfica de edades simples. El patrón es el mismo para hombres y mujeres.
+
+# Índice de Naciones Unidas
+
+El Índice de Naciones Unidas trabaja con grupos quinquenales. Combina tres medidas de irregularidad entre grupos vecinos: el cociente de edades de hombres (IEH), el de mujeres (IEM) y el cambio en el índice de masculinidad (IRS), con la fórmula INU = IEH + IEM + 3 × IRS. Se usan los grupos de 0-4 a 80-84 años.
+
+```{r inu}
+inu <- calcular_inu(quinquenales)
+write.csv(inu$tabla, "salidas/inu_detalle.csv", row.names = FALSE)
+
+kable(inu$resumen, digits = 3,
+      col.names = c("IEH", "IEM", "IRS", "INU", "Clasificación"))
+```
+
+```{r grafica-masculinidad, fig.height=3.8, fig.cap="Índice de masculinidad por grupo quinquenal."}
+inu_tabla <- inu$tabla |> mutate(grupo_edad = factor(grupo_edad, levels = grupo_edad))
+ggplot(inu_tabla, aes(grupo_edad, indice_masculinidad, group = 1)) +
+  geom_hline(yintercept = 100, linetype = "dashed", color = col_neutro) +
+  geom_line(color = "#1F3B57", linewidth = 0.9) +
+  geom_point(color = "#1F3B57", size = 2) +
+  labs(x = NULL, y = "Hombres por cada 100 mujeres",
+       title = "Índice de masculinidad por grupo de edad") +
+  tema + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r inu-valores, include=FALSE}
+inu_valor <- inu$resumen$indice_naciones_unidas
+```
+
+El INU es de **`r num(inu_valor, 2)`**, menor que 20, así que la información por grupos quinquenales es **satisfactoria**. Al agrupar en quinquenios, buena parte de la atracción hacia el 0 y el 5 queda dentro del mismo grupo y deja de pesar. Lo que más aporta al índice es la irregularidad del índice de masculinidad: baja de 102 a 87 hombres por cada 100 mujeres entre los 10 y los 34 años, algo que suele asociarse con la migración de hombres jóvenes y con su menor cobertura en el censo.
+
+# Prorrateo y suavizamiento
+
+Para trabajar con la estructura por edad, primero reparto a las `r num(no_especificado)` personas sin edad declarada entre los 18 grupos quinquenales, en proporción al tamaño de cada uno. Después suavizo los grupos de 10-14 a 70-74 años con el promedio móvil de 1/16 y reescalo el resultado para conservar el total.
+
+```{r prorrateo}
+prorrateo <- calcular_prorrateo(quinquenales)
+write.csv(prorrateo, "salidas/prorrateo_suavizamiento.csv", row.names = FALSE)
+
+prorrateo |>
+  select(grupo_edad, total_original, total_prorrateado, total_suavizado, total_ajustado) |>
+  bind_rows(summarise(prorrateo, grupo_edad = "Total",
+                      across(c(total_original, total_prorrateado, total_suavizado, total_ajustado), sum))) |>
+  kable(format.args = list(big.mark = ","),
+        col.names = c("Grupo de edad", "Original", "Prorrateado", "Suavizado 1/16", "Ajustado"))
+```
+
+La tabla muestra la población total; el archivo `salidas/prorrateo_suavizamiento.csv` incluye también hombres y mujeres.
+
+```{r piramide, fig.height=5.5, fig.cap="Pirámide de población con los grupos prorrateados y suavizados."}
+piramide <- prorrateo |>
+  transmute(grupo_edad = factor(grupo_edad, levels = grupo_edad),
+            Hombres = -hombres_ajustado / 1000, Mujeres = mujeres_ajustado / 1000) |>
+  pivot_longer(c(Hombres, Mujeres), names_to = "sexo", values_to = "miles")
+
+g_piramide <- ggplot(piramide, aes(miles, grupo_edad, fill = sexo)) +
+  geom_col(width = 0.85) +
+  scale_x_continuous(labels = function(x) format(abs(x), big.mark = ",")) +
+  scale_fill_manual(values = c(Hombres = col_hombres, Mujeres = col_mujeres), name = NULL) +
+  labs(x = "Miles de personas", y = NULL,
+       title = "Pirámide de población de Chiapas, 2020 (corregida)") +
+  tema + theme(legend.position = "top")
+g_piramide
+```
+
+# Conclusiones
+
+- La declaración por edad simple en Chiapas tiene una preferencia clara por las edades terminadas en 0 y, en menor medida, en 5. El índice de Whipple la clasifica como aproximada (0 y 5) o deficiente (solo 0), y el de Myers como de concentración mediana.
+- Por grupos quinquenales la calidad es satisfactoria según el Índice de Naciones Unidas, así que los quinquenios son una base razonable para análisis demográficos del estado.
+- Antes de usar edades simples conviene corregirlas. Con los quinquenios basta repartir la edad no especificada y suavizar, como se hizo aquí.
+- Las funciones de `R/funciones_demografia.R` reciben cualquier estado y año con el mismo formato de datos, así que el análisis se puede repetir para otras entidades sin cambiar el código.
+
+```{r figuras-readme, include=FALSE}
+# Copias de las gráficas principales para el README del repositorio.
+if (dir.exists("docs")) {
+  ggsave("docs/edad_simple.png", g_edad, width = 9, height = 4.2, dpi = 120, bg = "white")
+  ggsave("docs/myers.png", g_myers, width = 9, height = 3.8, dpi = 120, bg = "white")
+  ggsave("docs/piramide.png", g_piramide, width = 8, height = 5.5, dpi = 120, bg = "white")
+}
+```
